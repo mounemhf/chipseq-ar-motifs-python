@@ -10,7 +10,7 @@ Usage:
     python chipseq_ar_pipeline.py -c SRR1615985,SRR1615986 -i SRR1615984 -p PE -t 16
     python chipseq_ar_pipeline.py -c SRR1615985 -i SRR1615984 --resume
 
-Author: [Your Name]
+Author: MOUNEM HOUF
 License: MIT
 """
 
@@ -31,9 +31,48 @@ from typing import List, Optional, Dict, Tuple
 # CONSTANTS
 # ============================================================================
 
-VERSION = "1.0.0"
-GENOME_URL = "https://hgdownload.soe.ucsc.edu/goldenPath/{build}/bigZips/{build}.fa.gz"
+VERSION = "1.1.0"
 HOMER_URL = "http://homer.ucsd.edu/homer/configureHomer.pl"
+
+# Genome configurations: URL, MACS2 genome size, HOMER name, R TxDb package
+GENOME_CONFIG = {
+    "hg38": {
+        "name": "GRCh38 (hg38)",
+        "description": "Human genome assembly GRCh38 — UCSC hg38 (2013, most widely used)",
+        "url": "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz",
+        "macs2_genome": "hs",
+        "homer_genome": "hg38",
+        "homer_install": "hg38",
+        "txdb_package": "TxDb.Hsapiens.UCSC.hg38.knownGene",
+        "txdb_r": "TxDb.Hsapiens.UCSC.hg38.knownGene",
+        "orgdb": "org.Hs.eg.db",
+        "species": "hsa",
+    },
+    "hg19": {
+        "name": "GRCh37 (hg19)",
+        "description": "Human genome assembly GRCh37 — UCSC hg19 (2009, legacy, many older datasets)",
+        "url": "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz",
+        "macs2_genome": "hs",
+        "homer_genome": "hg19",
+        "homer_install": "hg19",
+        "txdb_package": "TxDb.Hsapiens.UCSC.hg19.knownGene",
+        "txdb_r": "TxDb.Hsapiens.UCSC.hg19.knownGene",
+        "orgdb": "org.Hs.eg.db",
+        "species": "hsa",
+    },
+    "t2t": {
+        "name": "T2T-CHM13v2.0",
+        "description": "Telomere-to-Telomere complete human genome (2022, gapless, most complete)",
+        "url": "https://s3-us-west-2.amazonaws.com/human-pangenomics/T2T/CHM13/assemblies/analysis_set/chm13v2.0.fa.gz",
+        "macs2_genome": "2.9e9",
+        "homer_genome": "chm13v2.0",
+        "homer_install": None,  # HOMER does not have T2T pre-built — use custom FASTA
+        "txdb_package": None,  # No pre-built TxDb for T2T
+        "txdb_r": None,
+        "orgdb": "org.Hs.eg.db",
+        "species": "hsa",
+    },
+}
 
 STEP_NAMES = {
     0: "Download data",
@@ -250,6 +289,25 @@ class ChIPseqPipeline:
         self.fe_cutoff = args.fold_enrichment
         self.summit_window = args.window
 
+        # Genome configuration
+        if self.genome_build not in GENOME_CONFIG:
+            print(f"ERROR: Unknown genome '{self.genome_build}'.")
+            print(f"Available genomes: {', '.join(GENOME_CONFIG.keys())}")
+            for key, cfg in GENOME_CONFIG.items():
+                print(f"  {key:6s} — {cfg['description']}")
+            sys.exit(1)
+
+        self.genome_cfg = GENOME_CONFIG[self.genome_build]
+        self.macs2_genome_size = self.genome_cfg["macs2_genome"]
+        self.homer_genome = self.genome_cfg["homer_genome"]
+        self.genome_url = self.genome_cfg["url"]
+
+        # Genome FASTA filename
+        if self.genome_build == "t2t":
+            self.genome_fa_name = "chm13v2.0.fa"
+        else:
+            self.genome_fa_name = f"{self.genome_build}.fa"
+
         # Directories
         self.project_dir = Path(args.output).resolve()
         self.raw_dir = self.project_dir / "data" / "raw"
@@ -264,7 +322,7 @@ class ChIPseqPipeline:
         self.logs_dir = self.project_dir / "logs"
 
         # Key file paths
-        self.genome_fa = self.genome_dir / f"{self.genome_build}.fa"
+        self.genome_fa = self.genome_dir / self.genome_fa_name
         self.genome_index = self.genome_dir / f"{self.genome_build}_bt2"
 
         # Create directories
@@ -349,15 +407,16 @@ class ChIPseqPipeline:
 
         # Download genome
         if not file_exists_and_nonempty(self.genome_fa):
-            url = GENOME_URL.format(build=self.genome_build)
+            self.log.info(f"Downloading {self.genome_cfg['name']} genome...")
+            self.log.info(f"  {self.genome_cfg['description']}")
             run_cmd(
-                f"wget -q -O {self.genome_fa}.gz {url}",
+                f"wget -q -O {self.genome_fa}.gz {self.genome_url}",
                 self.log, f"Downloading {self.genome_build} genome..."
             )
             run_cmd(f"gunzip {self.genome_fa}.gz", self.log)
             self.log.info("Genome downloaded")
         else:
-            self.log.info("SKIP genome — already exists")
+            self.log.info(f"SKIP genome ({self.genome_cfg['name']}) — already exists")
 
         # Build Bowtie2 index
         bt2_file = Path(f"{self.genome_index}.1.bt2")
@@ -440,7 +499,7 @@ class ChIPseqPipeline:
 
     def step3_alignment(self):
         """Align reads to reference genome with Bowtie2."""
-        print_banner("Step 3: Alignment (Bowtie2 → hg38)")
+        print_banner(f"Step 3: Alignment (Bowtie2 → {self.genome_cfg['name']})")
 
         for name in self.all_names:
             self.log.info(f"Aligning {name}...")
@@ -610,7 +669,7 @@ class ChIPseqPipeline:
 
         run_cmd(
             f"macs2 callpeak -t {chip_bams} -c {input_bam} "
-            f"-f BAM -g hs --outdir {self.peaks_dir} -n AR_ChIP "
+            f"-f BAM -g {self.macs2_genome_size} --outdir {self.peaks_dir} -n AR_ChIP "
             f"-q {self.macs2_qvalue} --keep-dup 1 --call-summits --bdg",
             self.log, "Running MACS2...",
             log_file=self.logs_dir / "macs2.log"
@@ -666,7 +725,7 @@ class ChIPseqPipeline:
 
         # HOMER annotation
         run_cmd(
-            f"annotatePeaks.pl {peaks_filtered} {self.genome_build} "
+            f"annotatePeaks.pl {peaks_filtered} {self.homer_genome} "
             f"-annStats {self.annot_dir}/annotation_stats.txt "
             f"> {self.annot_dir}/AR_peaks_annotated.txt",
             self.log, "Running HOMER annotatePeaks...",
@@ -674,19 +733,32 @@ class ChIPseqPipeline:
         )
         self.log.info("HOMER annotation done")
 
-        # ChIPseeker R script
+        # ChIPseeker R script — adapt TxDb to genome build
         r_script = self.logs_dir / "_annotation.R"
+        txdb_r = self.genome_cfg.get("txdb_r")
+        txdb_pkg = self.genome_cfg.get("txdb_package")
+        orgdb = self.genome_cfg.get("orgdb", "org.Hs.eg.db")
+        species = self.genome_cfg.get("species", "hsa")
+
+        if txdb_r is None:
+            self.log.warning(
+                f"No pre-built TxDb available for {self.genome_build} (T2T). "
+                "ChIPseeker annotation will be skipped. "
+                "HOMER annotation is still available above."
+            )
+            return
+
         r_code = textwrap.dedent(f"""\
         args <- commandArgs(trailingOnly = TRUE)
         peaks_file <- args[1]; output_dir <- args[2]
         suppressPackageStartupMessages({{
-          library(ChIPseeker); library(TxDb.Hsapiens.UCSC.hg38.knownGene)
-          library(org.Hs.eg.db); library(clusterProfiler); library(ggplot2)
+          library(ChIPseeker); library({txdb_pkg})
+          library({orgdb}); library(clusterProfiler); library(ggplot2)
         }})
         cat("Loading peaks...\\n")
         peaks <- readPeakFile(peaks_file)
-        txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
-        peakAnno <- annotatePeak(peaks, TxDb=txdb, annoDb="org.Hs.eg.db", level="gene")
+        txdb <- {txdb_r}
+        peakAnno <- annotatePeak(peaks, TxDb=txdb, annoDb="{orgdb}", level="gene")
         anno_df <- as.data.frame(peakAnno)
         write.csv(anno_df, file.path(output_dir,"AR_peaks_chipseeker.csv"), row.names=FALSE)
         pdf(file.path(output_dir,"annotation_pie.pdf"), w=8, h=8); plotAnnoPie(peakAnno); dev.off()
@@ -698,14 +770,14 @@ class ChIPseqPipeline:
         plotAvgProf(tagMatrix, xlim=c(-3000,3000), xlab="Distance to TSS (bp)",
                     ylab="Read count frequency"); dev.off()
         genes <- unique(anno_df$geneId[!is.na(anno_df$geneId)])
-        ego <- enrichGO(gene=genes, OrgDb=org.Hs.eg.db, ont="BP",
+        ego <- enrichGO(gene=genes, OrgDb={orgdb}, ont="BP",
                         pAdjustMethod="BH", qvalueCutoff=0.05, readable=TRUE)
         if(!is.null(ego) && nrow(as.data.frame(ego))>0) {{
           write.csv(as.data.frame(ego), file.path(output_dir,"GO_BP_enrichment.csv"), row.names=FALSE)
           pdf(file.path(output_dir,"GO_BP_dotplot.pdf"), w=10, h=8)
           print(dotplot(ego, showCategory=20, title="GO — AR targets")); dev.off()
         }}
-        ekegg <- enrichKEGG(gene=genes, organism="hsa", pAdjustMethod="BH", qvalueCutoff=0.05)
+        ekegg <- enrichKEGG(gene=genes, organism="{species}", pAdjustMethod="BH", qvalueCutoff=0.05)
         if(!is.null(ekegg) && nrow(as.data.frame(ekegg))>0) {{
           write.csv(as.data.frame(ekegg), file.path(output_dir,"KEGG_enrichment.csv"), row.names=FALSE)
           pdf(file.path(output_dir,"KEGG_dotplot.pdf"), w=10, h=8)
@@ -717,10 +789,12 @@ class ChIPseqPipeline:
         with open(r_script, "w") as f:
             f.write(r_code)
 
+        # Resolve Rscript path explicitly
+        rscript_path = shutil.which("Rscript") or "Rscript"
         run_cmd(
-            f"Rscript {r_script} {peaks_filtered} {self.annot_dir}",
+            f"{rscript_path} {r_script} {peaks_filtered} {self.annot_dir}",
             self.log, "Running ChIPseeker (R)...",
-            log_file=self.logs_dir / "chipseeker.log",
+            log_file=self.logs_dir / "chipseq.log",
             check=False
         )
         self.log.info("Annotation complete")
@@ -762,8 +836,16 @@ class ChIPseqPipeline:
         # HOMER
         self.log.info("Running HOMER findMotifsGenome.pl...")
         homer_out = self.motifs_dir / "homer"
+
+        # For T2T genome, HOMER needs the FASTA path instead of genome name
+        if self.genome_cfg["homer_install"] is None:
+            homer_genome_arg = str(self.genome_fa)
+            self.log.info(f"Using custom FASTA for HOMER (T2T): {self.genome_fa}")
+        else:
+            homer_genome_arg = self.homer_genome
+
         run_cmd(
-            f"findMotifsGenome.pl {summit_bed} {self.genome_build} {homer_out}/ "
+            f"findMotifsGenome.pl {summit_bed} {homer_genome_arg} {homer_out}/ "
             f"-size 200 -mask -p {self.threads}",
             self.log,
             log_file=self.logs_dir / "homer_motifs.log",
@@ -802,8 +884,22 @@ class ChIPseqPipeline:
         )
 
         # Try running in meme_env
+        # We use a bash -c wrapper to properly activate the conda env
+        conda_base = os.environ.get("CONDA_EXE", "").replace("/bin/conda", "")
+        if not conda_base:
+            conda_base = str(Path.home() / "miniforge3")
+            if not Path(conda_base).exists():
+                conda_base = str(Path.home() / "anaconda3")
+            if not Path(conda_base).exists():
+                conda_base = str(Path("/opt/anaconda3"))
+
+        meme_activate = (
+            f"source {conda_base}/etc/profile.d/conda.sh && "
+            f"conda activate meme_env && "
+        )
+
         run_cmd(
-            f"conda run --no-banner -n meme_env {meme_cmd}",
+            f"bash -c '{meme_activate}{meme_cmd}'",
             self.log,
             log_file=self.logs_dir / "memechip.log",
             check=False
@@ -824,7 +920,7 @@ class ChIPseqPipeline:
         if meme_txt.exists() and meme_db_arg:
             db_path = meme_db_arg.replace("-db ", "")
             run_cmd(
-                f"conda run --no-banner -n meme_env tomtom -oc {self.motifs_dir / 'tomtom'} {meme_txt} {db_path}",
+                f"bash -c '{meme_activate}tomtom -oc {self.motifs_dir / 'tomtom'} {meme_txt} {db_path}'",
                 self.log, "Running TOMTOM...",
                 log_file=self.logs_dir / "tomtom.log",
                 check=False
@@ -833,7 +929,7 @@ class ChIPseqPipeline:
         # FIMO
         if meme_txt.exists():
             run_cmd(
-                f"conda run --no-banner -n meme_env fimo --oc {self.motifs_dir / 'fimo'} --thresh 1e-4 {meme_txt} {self.genome_fa}",
+                f"bash -c '{meme_activate}fimo --oc {self.motifs_dir / 'fimo'} --thresh 1e-4 {meme_txt} {self.genome_fa}'",
                 self.log, "Running FIMO...",
                 log_file=self.logs_dir / "fimo.log",
                 check=False
@@ -904,13 +1000,36 @@ class ChIPseqPipeline:
         with open(r_script, "w") as f:
             f.write(r_code)
 
-        run_cmd(
-            f"Rscript {r_script}",
-            self.log, "Running motif analysis (R)...",
-            log_file=self.logs_dir / "motif_analysis.log",
-            check=False
-        )
-        self.log.info("Motif analysis complete")
+        # Find Rscript path explicitly (may be lost after conda env switches)
+        rscript_path = shutil.which("Rscript")
+        if not rscript_path:
+            # Try common conda paths
+            conda_base_result = run_cmd("conda info --base", self.log, check=False)
+            cbase = conda_base_result.stdout.strip() if conda_base_result.stdout else ""
+            for candidate in [
+                f"{cbase}/envs/chipseq/bin/Rscript",
+                f"{cbase}/bin/Rscript",
+                "/usr/local/bin/Rscript",
+                "/usr/bin/Rscript",
+            ]:
+                if Path(candidate).exists():
+                    rscript_path = candidate
+                    break
+
+        if rscript_path:
+            run_cmd(
+                f"{rscript_path} {r_script}",
+                self.log, "Running motif analysis (R)...",
+                log_file=self.logs_dir / "motif_analysis.log",
+                check=False
+            )
+            self.log.info("Motif analysis complete")
+        else:
+            self.log.warning(
+                "Rscript not found. Run manually:\n"
+                f"  conda activate chipseq\n"
+                f"  Rscript {r_script}"
+            )
 
     # ========================================================================
     # HTML REPORT
@@ -1093,7 +1212,8 @@ class ChIPseqPipeline:
         print(f"  ChIP SRR(s)   : {', '.join(self.chip_srrs)}")
         print(f"  Input SRR     : {self.input_srr}")
         print(f"  Read type     : {self.read_type}")
-        print(f"  Genome        : {self.genome_build}")
+        print(f"  Genome        : {self.genome_cfg['name']}")
+        print(f"                  {self.genome_cfg['description']}")
         print(f"  Threads       : {self.threads}")
         print(f"  MACS2 q-value : {self.macs2_qvalue}")
         print(f"  FE cutoff     : {self.fe_cutoff}")
@@ -1122,6 +1242,29 @@ class ChIPseqPipeline:
         # HOMER
         if not check_tool("findMotifsGenome.pl", self.log):
             missing.append("homer")
+
+        # MEME (in meme_env — check via bash activation)
+        conda_exe = shutil.which("conda")
+        if conda_exe:
+            result = run_cmd("conda info --base", self.log, check=False)
+            cbase = result.stdout.strip() if result.stdout else ""
+            if cbase:
+                meme_check = run_cmd(
+                    f"bash -c 'source {cbase}/etc/profile.d/conda.sh && "
+                    f"conda activate meme_env && which meme-chip'",
+                    self.log, check=False
+                )
+                if meme_check.returncode == 0:
+                    self.log.info("MEME Suite (in meme_env)")
+                else:
+                    self.log.warning("MEME Suite — NOT FOUND in meme_env")
+                    missing.append("meme")
+            else:
+                self.log.warning("MEME Suite — could not detect conda base")
+                missing.append("meme")
+        else:
+            self.log.warning("MEME Suite — conda not found")
+            missing.append("meme")
 
         if missing:
             self.log.warning(f"Missing tools: {', '.join(missing)}")
@@ -1221,8 +1364,15 @@ def parse_args() -> argparse.Namespace:
         epilog=textwrap.dedent("""\
         Examples:
           python chipseq_ar_pipeline.py -c SRR1615985 -i SRR1615984
+          python chipseq_ar_pipeline.py -c SRR1615985 -i SRR1615984 -g hg19
+          python chipseq_ar_pipeline.py -c SRR1615985 -i SRR1615984 -g t2t
           python chipseq_ar_pipeline.py -c SRR1615985,SRR1615986 -i SRR1615984 -p PE -t 16
           python chipseq_ar_pipeline.py --resume -o AR_ChIP_project
+
+        Available genomes:
+          hg38  — GRCh38 (2013) : Most widely used, recommended for new analyses
+          hg19  — GRCh37 (2009) : Legacy, use for older datasets aligned to hg19
+          t2t   — T2T-CHM13v2.0 (2022) : Gapless telomere-to-telomere assembly
 
         Suggested GEO datasets:
           GSE65066 (LNCaP): -c SRR1615985 -i SRR1615984
@@ -1246,7 +1396,9 @@ def parse_args() -> argparse.Namespace:
                         choices=["SE", "PE"],
                         help="Read type: SE (single-end) or PE (paired-end) (default: SE)")
     parser.add_argument("-g", "--genome", type=str, default="hg38",
-                        help="Genome build (default: hg38)")
+                        choices=["hg38", "hg19", "t2t"],
+                        help="Genome build: hg38 (GRCh38, default), hg19 (GRCh37, legacy), "
+                             "t2t (T2T-CHM13v2.0, telomere-to-telomere)")
     parser.add_argument("-q", "--qvalue", type=float, default=0.01,
                         help="MACS2 q-value threshold (default: 0.01)")
     parser.add_argument("-f", "--fold-enrichment", type=float, default=4,

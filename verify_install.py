@@ -50,7 +50,7 @@ check("findMotifsGenome.pl", "findMotifsGenome.pl")
 check("annotatePeaks.pl", "annotatePeaks.pl")
 
 print("\n=== Checking MEME Suite (meme_env) ===")
-check("meme-chip", "conda run --no-banner -n meme_env which meme-chip", use_shell=True)
+check("meme-chip", "bash -c 'source $(conda info --base)/etc/profile.d/conda.sh && conda activate meme_env && which meme-chip'", use_shell=True)
 
 print("\n=== Checking R packages ===")
 for pkg in ["ChIPseeker", "TxDb.Hsapiens.UCSC.hg38.knownGene", "org.Hs.eg.db",
