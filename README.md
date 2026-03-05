@@ -166,7 +166,14 @@ Optional:
 ```
 
 ### Examples
+# hg38 (défaut) — le plus utilisé
+python chipseq_ar_pipeline.py -c SRR1615985 -i SRR1615984 -g hg38
 
+# hg19 — legacy, pour les anciennes données
+python chipseq_ar_pipeline.py -c SRR1615985 -i SRR1615984 -g hg19
+
+# T2T — assemblage complet télomère-à-télomère (2022)
+python chipseq_ar_pipeline.py -c SRR1615985 -i SRR1615984 -g t2t
 ```bash
 # Basic
 python chipseq_ar_pipeline.py -c SRR1615985 -i SRR1615984
